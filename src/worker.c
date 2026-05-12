@@ -62,6 +62,7 @@ int worker_init(struct worker_ctx *ctx, unsigned lcore_id,
     ctx->export_tsc_interval = cfg->stats_interval_s * hz;
     ctx->timeout_tsc         = cfg->flow_timeout_s   * hz;
     ctx->last_export_tsc     = rte_rdtsc();
+    ctx->perf.interval_tsc   = ctx->last_export_tsc;
 
     int socket = rte_lcore_to_socket_id(lcore_id);
     if (flow_table_init(&ctx->ftable, cfg->max_flows, lcore_id, socket) != 0)
@@ -112,8 +113,12 @@ int worker_run(void *arg)
         }
 
         uint16_t nb_rx = rte_eth_rx_burst(rx_port, rx_queue, rx_pkts, burst);
-        if (nb_rx == 0)
+        if (nb_rx == 0) {
+            ctx->perf.idle_polls++;
             continue;
+        }
+        ctx->perf.active_polls++;
+        uint64_t proc_start = rte_rdtsc();
         uint16_t nb_tx = 0;
 
         for (uint16_t i = 0; i < nb_rx; i++) {
@@ -176,6 +181,10 @@ int worker_run(void *arg)
         /* Free unsent packets */
         for (uint16_t i = nb_sent; i < nb_tx; i++)
             rte_pktmbuf_free(tx_pkts[i]);
+
+        ctx->perf.proc_cycles += rte_rdtsc() - proc_start;
+        ctx->perf.rx_packets  += nb_rx;
+        ctx->perf.tx_packets  += nb_sent;
     }
 
     /* Final export on shutdown */

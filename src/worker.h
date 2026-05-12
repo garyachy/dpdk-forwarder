@@ -25,6 +25,16 @@ struct worker_ctx {
     char                csv_path[512];
     /* throttle "table full" warning: emit at most once per export interval */
     bool                table_full_warned;
+
+    /* per-interval performance counters (reset each export cycle) */
+    struct {
+        uint64_t proc_cycles;   /* TSC cycles spent in active rx+process+tx */
+        uint64_t rx_packets;    /* packets received this interval */
+        uint64_t tx_packets;    /* packets forwarded this interval */
+        uint64_t active_polls;  /* rx_burst calls that returned > 0 */
+        uint64_t idle_polls;    /* rx_burst calls that returned 0 */
+        uint64_t interval_tsc;  /* TSC at start of this interval */
+    } perf;
 };
 
 int  worker_init(struct worker_ctx *ctx, unsigned lcore_id,
