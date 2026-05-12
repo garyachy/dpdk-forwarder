@@ -53,6 +53,7 @@ struct flow_entry *flow_lookup_or_create(struct flow_table *ft,
                                          const struct flow_key *key,
                                          uint64_t now_tsc);
 
-/* Delete flows where now_tsc - last_seen_tsc > timeout_tsc. */
-void flow_expire(struct flow_table *ft, uint64_t now_tsc,
-                 uint64_t timeout_tsc);
+#ifdef UNIT_TEST
+/* Test-only helper: expire flows inline (production expiry is in stats_export_and_expire). */
+void flow_expire(struct flow_table *ft, uint64_t now_tsc, uint64_t timeout_tsc);
+#endif

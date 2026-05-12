@@ -14,8 +14,8 @@
 #include "stats.h"
 #include "log.h"
 
-static void parse_key(struct rte_mbuf *pkt, struct flow_key *key,
-                      bool *is_ip)
+static __rte_always_inline void parse_key(struct rte_mbuf *pkt,
+                                          struct flow_key *key, bool *is_ip)
 {
     memset(key, 0, sizeof(*key));
     *is_ip = false;

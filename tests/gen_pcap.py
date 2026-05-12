@@ -44,16 +44,17 @@ FLOWS = [
 ]
 
 out = sys.argv[1] if len(sys.argv) > 1 else '/tmp/test.pcap'
+reps = int(sys.argv[2]) if len(sys.argv) > 2 else 20  # packets per flow
 
 with open(out, 'wb') as f:
     # PCAP global header
     f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
     ts = 1715000000
-    for i in range(20):
+    for i in range(reps):
         for src_ip, dst_ip, sp, dp in FLOWS:
             pkt = make_eth_ipv4_tcp(src_ip, dst_ip, sp, dp)
             f.write(struct.pack('<IIII', ts, i * 1000, len(pkt), len(pkt)))
             f.write(pkt)
         ts += 1
 
-print(f'Written {20 * len(FLOWS)} packets to {out}')
+print(f'Written {reps * len(FLOWS)} packets to {out}')

@@ -19,13 +19,13 @@ int flow_table_init(struct flow_table *ft, uint32_t capacity,
     snprintf(name, sizeof(name), "flow_core_%u", core_id);
 
     struct rte_hash_parameters hp = {
-        .name            = name,
-        .entries         = capacity,
-        .key_len         = sizeof(struct flow_key),
-        .hash_func       = rte_jhash,
+        .name               = name,
+        .entries            = capacity,
+        .key_len            = sizeof(struct flow_key),
+        .hash_func          = rte_jhash,
         .hash_func_init_val = 0,
-        .socket_id       = socket_id,
-        .extra_flag      = RTE_HASH_EXTRA_FLAGS_NO_FREE_ON_DEL,
+        .socket_id          = socket_id,
+        .extra_flag         = RTE_HASH_EXTRA_FLAGS_NO_FREE_ON_DEL,
     };
 
     ft->ht = rte_hash_create(&hp);
@@ -68,7 +68,7 @@ struct flow_entry *flow_lookup_or_create(struct flow_table *ft,
                                          uint64_t now_tsc)
 {
     int32_t pos = rte_hash_lookup(ft->ht, key);
-    if (pos >= 0) {
+    if (likely(pos >= 0)) {
         ft->entries[pos].last_seen_tsc = now_tsc;
         return &ft->entries[pos];
     }
@@ -90,23 +90,6 @@ struct flow_entry *flow_lookup_or_create(struct flow_table *ft,
     return e;
 }
 
-void flow_expire(struct flow_table *ft, uint64_t now_tsc, uint64_t timeout_tsc)
-{
-    uint32_t iter = 0;
-    const void *key;
-    void *data;
-    int32_t pos;
-
-    while ((pos = rte_hash_iterate(ft->ht, &key, &data, &iter)) >= 0) {
-        struct flow_entry *e = &ft->entries[pos];
-        if (now_tsc - e->last_seen_tsc > timeout_tsc) {
-            rte_hash_del_key(ft->ht, key);
-            memset(e, 0, sizeof(*e));
-            ft->count--;
-        }
-    }
-}
-
 /* ── Unit-test shim ──────────────────────────────────────────────────────── */
 #else /* UNIT_TEST */
 
@@ -116,12 +99,10 @@ void flow_expire(struct flow_table *ft, uint64_t now_tsc, uint64_t timeout_tsc)
 /* Minimal open-addressing hash table (linear probing) for unit tests.
  * Not thread-safe; single-threaded test use only. */
 
-#define UT_EMPTY  0xFFFFFFFF
-
 typedef struct {
     uint32_t           capacity;
     uint32_t           count;
-    struct flow_entry *slots;   /* same array used for entries */
+    struct flow_entry *slots;
     uint8_t           *occupied;
 } ut_ht_t;
 
