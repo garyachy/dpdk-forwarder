@@ -67,7 +67,7 @@ int worker_init(struct worker_ctx *ctx, unsigned lcore_id,
     if (flow_table_init(&ctx->ftable, cfg->max_flows, lcore_id, socket) != 0)
         return -1;
 
-    snprintf(ctx->csv_path, sizeof(ctx->csv_path),
+    snprintf(ctx->csv_path, sizeof(ctx->csv_path) - 1,
              "%s/flow_stats_core_%u.csv", cfg->output_dir, lcore_id);
 
     ctx->csv_file = fopen(ctx->csv_path, "a");

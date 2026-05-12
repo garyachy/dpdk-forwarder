@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <time.h>
+#include <inttypes.h>
 #include <arpa/inet.h>
 
 #include "stats.h"
@@ -55,9 +56,6 @@ void stats_export_and_expire(struct worker_ctx *ctx, uint64_t now_tsc)
     while ((pos = rte_hash_iterate(ft->ht, &key, &data, &iter)) >= 0) {
         struct flow_entry *e = &ft->entries[pos];
 
-        if (fprintf(f, "") < 0) {
-            /* fprintf itself handles the row; just detect errors */
-        }
         stats_write_row(f, e);
 
         if (now_tsc - e->last_seen_tsc > timeout_tsc) {

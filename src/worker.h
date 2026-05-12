@@ -22,7 +22,7 @@ struct worker_ctx {
     uint64_t            export_tsc_interval; /* pre-computed */
     uint64_t            timeout_tsc;         /* pre-computed */
     FILE               *csv_file;
-    char                csv_path[256];
+    char                csv_path[512];
     /* throttle "table full" warning: emit at most once per export interval */
     bool                table_full_warned;
 };

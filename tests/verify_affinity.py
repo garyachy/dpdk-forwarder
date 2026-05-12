@@ -42,8 +42,11 @@ def main():
         print("Usage: verify_affinity.py flow_stats_core_*.csv")
         sys.exit(1)
 
-    core_ids = [parse_core(f) for f in files]
-    nb_workers = max(core_ids) + 1
+    core_ids   = [parse_core(f) for f in files]
+    nb_workers = len(files)
+    # Map queue index (0..N-1) to lcore id via sorted order,
+    # matching the assignment in worker_init (queue_idx = sorted position).
+    sorted_cores = sorted(core_ids)
 
     errors = 0
     total  = 0
@@ -56,12 +59,12 @@ def main():
                 h = flow_hash(row['src_ip'], row['dst_ip'],
                               row['src_port'], row['dst_port'],
                               row['proto'])
-                expected = h % nb_workers
-                if expected != core_id:
+                expected_core = sorted_cores[h % nb_workers]
+                if expected_core != core_id:
                     print(f"FAIL [{fname}] flow "
                           f"{row['src_ip']}:{row['src_port']} → "
                           f"{row['dst_ip']}:{row['dst_port']} proto={row['proto']}"
-                          f" hash%{nb_workers}={expected} but file says core {core_id}")
+                          f" expected core {expected_core} but file says core {core_id}")
                     errors += 1
 
     if errors == 0:

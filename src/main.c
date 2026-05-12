@@ -68,11 +68,21 @@ int main(int argc, char **argv)
     if (!mbuf_pool)
         rte_exit(EXIT_FAILURE, "rte_pktmbuf_pool_create failed\n");
 
-    if (port_init(cfg.rx_port, cfg.nb_workers, mbuf_pool) != 0)
+    int rx_queues = port_init(cfg.rx_port, cfg.nb_workers, mbuf_pool);
+    if (rx_queues < 0)
         rte_exit(EXIT_FAILURE, "port_init failed for rx port %u\n", cfg.rx_port);
 
-    if (port_init(cfg.tx_port, cfg.nb_workers, mbuf_pool) != 0)
+    int tx_queues = port_init(cfg.tx_port, cfg.nb_workers, mbuf_pool);
+    if (tx_queues < 0)
         rte_exit(EXIT_FAILURE, "port_init failed for tx port %u\n", cfg.tx_port);
+
+    /* Clamp workers to the actual queue count both ports support */
+    uint16_t actual_queues = (uint16_t)RTE_MIN(rx_queues, tx_queues);
+    if (cfg.nb_workers > actual_queues) {
+        LOG_WARN("clamping workers %u → %u (device queue limit)",
+                 cfg.nb_workers, actual_queues);
+        cfg.nb_workers = actual_queues;
+    }
 
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);

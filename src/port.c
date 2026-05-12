@@ -46,12 +46,30 @@ int port_init(uint16_t port_id, uint16_t nb_queues,
         return ret;
     }
 
-    /* Mask RSS hash types to what the device supports */
-    port_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
+    /* Disable RSS entirely if the PMD doesn't support it */
+    if (dev_info.flow_type_rss_offloads == 0 || dev_info.hash_key_size == 0) {
+        LOG_WARN("port %u: no RSS support, using single queue", port_id);
+        port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
+        port_conf.rx_adv_conf.rss_conf.rss_key     = NULL;
+        port_conf.rx_adv_conf.rss_conf.rss_key_len = 0;
+        port_conf.rx_adv_conf.rss_conf.rss_hf      = 0;
+    } else {
+        /* Mask RSS hash types to what the device supports */
+        port_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
+        /* Truncate RSS key to device's preferred length (virtio=40B, NICs=52B) */
+        if (dev_info.hash_key_size < port_conf.rx_adv_conf.rss_conf.rss_key_len)
+            port_conf.rx_adv_conf.rss_conf.rss_key_len = dev_info.hash_key_size;
+    }
 
     /* Enable fast-free TX offload if supported */
     if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
         port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+
+    /* Cap queues to what the device supports */
+    if (nb_queues > dev_info.max_rx_queues)
+        nb_queues = dev_info.max_rx_queues;
+    if (nb_queues > dev_info.max_tx_queues)
+        nb_queues = dev_info.max_tx_queues;
 
     ret = rte_eth_dev_configure(port_id, nb_queues, nb_queues, &port_conf);
     if (ret != 0) {
@@ -112,7 +130,7 @@ int port_init(uint16_t port_id, uint16_t nb_queues,
     LOG_INFO("port %u up: MAC=" RTE_ETHER_ADDR_PRT_FMT " queues=%u",
              port_id, RTE_ETHER_ADDR_BYTES(&addr), nb_queues);
 
-    return 0;
+    return nb_queues;
 }
 
 void port_stats_print(uint16_t port_id)
