@@ -14,6 +14,20 @@ testpmd (txonly) ──net_vhost──[Unix socket]──net_virtio_user── f
 
 See [FUNC_SPEC.md](FUNC_SPEC.md) for the full functional specification.
 
+## Bonus Features (both implemented)
+
+**1. Multiple cores with separate RX/TX threads**
+
+Each worker lcore owns a dedicated RX queue, TX queue, and flow table — no cross-core locks anywhere. The number of workers is set with `--workers N`; each maps 1:1 to an lcore and a queue pair. RSS with a symmetric Toeplitz key ensures all packets of a given flow always land on the same queue and therefore the same core.
+
+**2. Configurable flow table capacity with graceful drop**
+
+`--max-flows N` sets the per-core flow table size (default 65536). When the table is full, new flows are silently dropped and a single warning is logged:
+```
+WARN: flow table full on core 2, dropping packets
+```
+The warning is suppressed for subsequent drops within the same export interval (`table_full_warned` flag) to avoid log flooding. Active flows that are already tracked continue to be forwarded normally.
+
 ## Dependencies
 
 | Dependency         | Version     | Source                |
