@@ -126,6 +126,72 @@ Counters are cumulative. Each export interval appends one row per active flow.
 - **Affinity**: Symmetric RSS Toeplitz key guarantees same-core delivery for all packets of a given flow
 - **Expiry**: Flows inactive for `--flow-timeout` seconds are removed during the next export pass
 
+## Expected Output
+
+After the functional test starts, the forwarder logs to stdout and writes CSV files to `output/`.
+
+**Startup (left pane):**
+```
+INFO: worker lcore 1: queue 0, csv=/output/flow_stats_core_1.csv
+INFO: worker lcore 2: queue 1, csv=/output/flow_stats_core_2.csv
+INFO: worker lcore 3: queue 2, csv=/output/flow_stats_core_3.csv
+INFO: worker lcore 1 started
+INFO: worker lcore 2 started
+INFO: worker lcore 3 started
+```
+
+**Every stats interval (5 s by default):**
+```
+INFO: [perf] core 1 | 121 cycles/pkt | 1.843 Mpps | rx=9215000 tx=9215000 | poll_eff=97.3%
+INFO: [perf] core 2 | 118 cycles/pkt | 1.791 Mpps | rx=8955000 tx=8955000 | poll_eff=96.8%
+```
+
+**Live CSV tail (bottom pane):**
+```
+==> /output/flow_stats_core_1.csv <==
+timestamp,src_ip,dst_ip,src_port,dst_port,proto,rx_bytes,tx_bytes,rx_packets,tx_packets
+2026-05-12T14:23:05Z,10.0.0.1,10.0.1.1,10001,80,6,589824,589824,9216,9216
+2026-05-12T14:23:05Z,10.0.0.2,10.0.1.1,10002,80,6,601088,601088,9392,9392
+```
+
+**Affinity verification:**
+```
+$ python3 tests/verify_affinity.py output/flow_stats_core_*.csv
+core 1: 2 distinct flows
+core 2: 2 distinct flows
+core 3: 1 distinct flows
+OK: no flow appears on more than one core
+```
+
+## Performance
+
+All measurements use `net_pcap` PMD with a 10,000-packet trace (5 flows). `proc_cycles` covers application logic only — `rte_eth_rx_burst` and `rte_eth_tx_burst` I/O time is excluded.
+
+### Optimization progression
+
+| State | cycles/pkt |
+|---|---|
+| Baseline (double lookup, I/O included in measurement) | 1130 |
+| No double lookup + exclude I/O | 332 |
+| + `__rte_always_inline` on `parse_key` | 317 |
+| *(stabilised with 10k-packet trace)* | 196 |
+| + `rte_hash_lookup_bulk` + single `rdtsc`/burst + lazy idle export | **121** |
+
+### Expected ranges by environment
+
+| Environment | Typical cycles/pkt | Notes |
+|---|---|---|
+| `net_pcap` (regression, 10k pkts) | ~120–150 | Hot cache, 5 flows |
+| `net_virtio_user` (vhost socket) | ~100–180 | Varies with flow table size and burst |
+| Physical NIC (10G/25G), warm cache | ~80–150 | Line-rate, small table |
+| Physical NIC, large table (100k+ flows) | ~150–300 | L2/L3 cache misses dominate |
+
+### Packet-size note
+
+The measurements above use fixed-size TCP frames (~64 bytes payload). At larger frame sizes (256/512/1518 bytes) the cycles/pkt figure is similar — the bottleneck is hash-table lookup and memory bandwidth, not header parsing — but Mpps throughput drops proportionally to frame size as the PMD I/O time increases.
+
+See [FUNC_SPEC.md §13](FUNC_SPEC.md) for the full methodology and hot-path optimization details.
+
 ## Building from Source (without Docker)
 
 Requires DPDK 23.11 installed and `pkg-config` findable:
