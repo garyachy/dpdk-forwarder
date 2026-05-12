@@ -1,0 +1,14 @@
+option('max_flows',
+  type        : 'integer',
+  value       : 65536,
+  description : 'Default flow table capacity per core')
+
+option('stats_interval',
+  type        : 'integer',
+  value       : 5,
+  description : 'Default stats export interval in seconds')
+
+option('flow_timeout',
+  type        : 'integer',
+  value       : 60,
+  description : 'Default flow inactivity timeout in seconds')

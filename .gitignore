@@ -1,0 +1,6 @@
+build/
+output/
+*.csv
+*.o
+*.a
+*.so

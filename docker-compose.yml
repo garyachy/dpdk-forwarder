@@ -1,0 +1,47 @@
+version: '3.8'
+
+# Both services share a volume for vhost-user Unix sockets.
+# The forwarder (server=1) creates the sockets; testpmd (client=1) connects.
+#
+# Host hugepage prerequisite:
+#   echo 256 | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+#
+# Usage:
+#   docker compose up --build
+
+services:
+  forwarder:
+    build: .
+    image: dpdk-forwarder
+    privileged: true
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+      - socks:/var/run/dpdk/socks
+      - ./output:/output
+    command: >
+      dpdk-forwarder
+        -l 0-3 -n 4 --socket-mem 512 --file-prefix fwd
+        --vdev "net_virtio_user0,path=/var/run/dpdk/socks/fwd_rx.sock,queues=4,queue_size=1024,server=1"
+        --vdev "net_virtio_user1,path=/var/run/dpdk/socks/fwd_tx.sock,queues=4,queue_size=1024,server=1"
+        --
+        --rx-port 0 --tx-port 1 --workers 3 --stats-interval 5
+        --flow-timeout 30 --output-dir /output
+
+  traffic-gen:
+    image: dpdk-forwarder
+    privileged: true
+    depends_on:
+      - forwarder
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+      - socks:/var/run/dpdk/socks
+    # Wait a moment for the forwarder to create the sockets, then connect
+    command: >
+      bash -c "sleep 3 && dpdk-testpmd
+        -l 4-7 -n 4 --socket-mem 512 --file-prefix gen
+        --vdev 'net_vhost0,iface=/var/run/dpdk/socks/fwd_rx.sock,queues=4,client=1'
+        --vdev 'net_vhost1,iface=/var/run/dpdk/socks/fwd_tx.sock,queues=4,client=1'
+        -- --rxq=4 --txq=4 --nb-cores=3 --forward-mode=txonly --auto-start"
+
+volumes:
+  socks:
