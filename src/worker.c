@@ -102,11 +102,18 @@ int worker_run(void *arg)
     LOG_INFO("worker lcore %u started", ctx->lcore_id);
 
     while (!force_quit) {
+        uint64_t now_tsc = rte_rdtsc();
+
+        /* Export and expire even when idle so stats are flushed after traffic bursts */
+        if (now_tsc - ctx->last_export_tsc > ctx->export_tsc_interval) {
+            stats_export_and_expire(ctx, now_tsc);
+            ctx->last_export_tsc     = now_tsc;
+            ctx->table_full_warned   = false;
+        }
+
         uint16_t nb_rx = rte_eth_rx_burst(rx_port, rx_queue, rx_pkts, burst);
         if (nb_rx == 0)
             continue;
-
-        uint64_t now_tsc = rte_rdtsc();
         uint16_t nb_tx = 0;
 
         for (uint16_t i = 0; i < nb_rx; i++) {
@@ -169,13 +176,6 @@ int worker_run(void *arg)
         /* Free unsent packets */
         for (uint16_t i = nb_sent; i < nb_tx; i++)
             rte_pktmbuf_free(tx_pkts[i]);
-
-        /* Periodic stats export + expiry */
-        if (now_tsc - ctx->last_export_tsc > ctx->export_tsc_interval) {
-            stats_export_and_expire(ctx, now_tsc);
-            ctx->last_export_tsc     = now_tsc;
-            ctx->table_full_warned   = false; /* reset warning throttle */
-        }
     }
 
     /* Final export on shutdown */
