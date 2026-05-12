@@ -7,6 +7,7 @@
 #include <rte_ether.h>
 #include <rte_cycles.h>
 #include <rte_lcore.h>
+#include <rte_prefetch.h>
 
 #include "worker.h"
 #include "flow.h"
@@ -97,8 +98,9 @@ int worker_run(void *arg)
     const uint16_t tx_queue = ctx->tx_queue_id;
     const uint32_t burst    = cfg->burst_size;
 
-    struct rte_mbuf *rx_pkts[512];
-    struct rte_mbuf *tx_pkts[512];
+    struct rte_mbuf    *rx_pkts[512];
+    struct rte_mbuf    *tx_pkts[512];
+    struct flow_entry  *tx_flows[512]; /* flow entry per tx_pkt — no re-lookup */
 
     LOG_INFO("worker lcore %u started", ctx->lcore_id);
 
@@ -108,8 +110,8 @@ int worker_run(void *arg)
         /* Export and expire even when idle so stats are flushed after traffic bursts */
         if (now_tsc - ctx->last_export_tsc > ctx->export_tsc_interval) {
             stats_export_and_expire(ctx, now_tsc);
-            ctx->last_export_tsc     = now_tsc;
-            ctx->table_full_warned   = false;
+            ctx->last_export_tsc   = now_tsc;
+            ctx->table_full_warned = false;
         }
 
         uint16_t nb_rx = rte_eth_rx_burst(rx_port, rx_queue, rx_pkts, burst);
@@ -118,10 +120,16 @@ int worker_run(void *arg)
             continue;
         }
         ctx->perf.active_polls++;
+
+        /* ── per-burst processing: parse → lookup → update → build tx_buf ── */
         uint64_t proc_start = rte_rdtsc();
         uint16_t nb_tx = 0;
 
         for (uint16_t i = 0; i < nb_rx; i++) {
+            /* Prefetch next packet's headers one iteration ahead */
+            if (i + 1 < nb_rx)
+                rte_prefetch0(rte_pktmbuf_mtod(rx_pkts[i + 1], void *));
+
             struct rte_mbuf *pkt = rx_pkts[i];
             struct flow_key key;
             bool is_ip;
@@ -155,36 +163,31 @@ int worker_run(void *arg)
                 rte_ether_addr_copy(&cfg->dst_mac, &eth->dst_addr);
             }
 
+            /* Store entry pointer — reused for TX stats, avoids re-lookup */
+            tx_flows[nb_tx] = e;
             tx_pkts[nb_tx++] = pkt;
         }
+
+        /* Measure only application processing cycles, not PMD I/O */
+        ctx->perf.proc_cycles += rte_rdtsc() - proc_start;
+        ctx->perf.rx_packets  += nb_rx;
 
         if (nb_tx == 0)
             continue;
 
         uint16_t nb_sent = rte_eth_tx_burst(tx_port, tx_queue, tx_pkts, nb_tx);
 
-        /* Update TX stats for sent packets */
+        /* Update TX stats using stored pointers — no re-parse, no re-lookup */
         for (uint16_t i = 0; i < nb_sent; i++) {
-            struct flow_key key;
-            bool is_ip;
-            parse_key(tx_pkts[i], &key, &is_ip);
-            if (is_ip) {
-                struct flow_entry *e =
-                    flow_lookup_or_create(&ctx->ftable, &key, now_tsc);
-                if (e) {
-                    e->tx_packets++;
-                    e->tx_bytes += rte_pktmbuf_pkt_len(tx_pkts[i]);
-                }
-            }
+            tx_flows[i]->tx_packets++;
+            tx_flows[i]->tx_bytes += rte_pktmbuf_pkt_len(tx_pkts[i]);
         }
+
+        ctx->perf.tx_packets += nb_sent;
 
         /* Free unsent packets */
         for (uint16_t i = nb_sent; i < nb_tx; i++)
             rte_pktmbuf_free(tx_pkts[i]);
-
-        ctx->perf.proc_cycles += rte_rdtsc() - proc_start;
-        ctx->perf.rx_packets  += nb_rx;
-        ctx->perf.tx_packets  += nb_sent;
     }
 
     /* Final export on shutdown */
