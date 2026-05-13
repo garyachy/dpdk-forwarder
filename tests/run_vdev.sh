@@ -34,7 +34,7 @@ tmux new-session -d -s "$SESSION" -x 240 -y 55
 # ── Pane 0: forwarder (MASTER, creates both sockets in server=1 mode) ──────
 tmux send-keys -t "$SESSION":0.0 \
     "dpdk-forwarder \
-      -l 0-3 -n 4 --socket-mem 512 --file-prefix fwd \
+      -l 0-3 -n 4 --socket-mem 512 --file-prefix fwd --single-file-segments \
       --vdev 'net_virtio_user0,path=${SOCK_RX},queues=4,queue_size=1024,server=1' \
       --vdev 'net_virtio_user1,path=${SOCK_TX},queues=4,queue_size=1024,server=1' \
       -- \
@@ -52,16 +52,15 @@ done
 [ -S "$SOCK_RX" ] || { echo "ERROR: forwarder did not create $SOCK_RX" >&2; exit 1; }
 
 # ── Pane 1: testpmd-A — traffic generator (SLAVE, connects to RX socket) ───
-# Using net_vhost client=1 (SLAVE) to speak to the forwarder's MASTER socket.
+# Pass command directly to split-window to avoid send-keys race (first char drop).
+# net_vhost client=1 (SLAVE) speaks to the forwarder's MASTER socket.
 # This connection unblocks the forwarder so it can proceed to create the TX socket.
-tmux split-window -h -t "$SESSION":0
-tmux send-keys -t "$SESSION":0.1 \
+tmux split-window -h -t "$SESSION":0 \
     "dpdk-testpmd \
-      -l 4-5 -n 4 --socket-mem 256 --file-prefix genA \
+      -l 4-5 -n 4 --socket-mem 256 --file-prefix genA --single-file-segments \
       --vdev 'net_vhost0,iface=${SOCK_RX},queues=4,client=1' \
       -- --rxq=4 --txq=4 --nb-cores=1 \
-         --forward-mode=txonly --auto-start" \
-    Enter
+         --forward-mode=txonly --auto-start 2>&1 | tee /tmp/genA.log"
 
 # Wait for TX socket (created by forwarder after its first accept() returns)
 echo "Waiting for TX socket..."
@@ -72,19 +71,26 @@ done
 [ -S "$SOCK_TX" ] || { echo "ERROR: forwarder did not create $SOCK_TX" >&2; exit 1; }
 
 # ── Pane 2: testpmd-B — traffic sink (SLAVE, connects to TX socket) ────────
-tmux split-window -v -t "$SESSION":0.0
-tmux send-keys -t "$SESSION":0.2 \
+tmux split-window -v -t "$SESSION":0.0 \
     "dpdk-testpmd \
-      -l 6-7 -n 4 --socket-mem 256 --file-prefix genB \
+      -l 6-7 -n 4 --socket-mem 256 --file-prefix genB --single-file-segments \
       --vdev 'net_vhost0,iface=${SOCK_TX},queues=4,client=1' \
       -- --rxq=4 --txq=4 --nb-cores=1 \
-         --forward-mode=rxonly --auto-start" \
-    Enter
+         --forward-mode=rxonly --auto-start 2>&1 | tee /tmp/genB.log"
 
 # ── Pane 3: CSV monitor ────────────────────────────────────────────────────
-tmux split-window -v -t "$SESSION":0.1
-tmux send-keys -t "$SESSION":0.3 \
-    "watch -n2 'tail -5 ${OUTPUT_DIR}/flow_stats_core_*.csv 2>/dev/null || echo \"no CSV yet\"'" \
-    Enter
+# Use a bash loop instead of watch to avoid glob-in-watch quoting issues.
+cat > /tmp/csv_watch.sh << 'EOF'
+#!/bin/bash
+while true; do
+    clear
+    printf '=== %s ===\n' "$(date -u)"
+    f=( /output/flow_stats_core_*.csv )
+    [ -f "${f[0]}" ] && tail -5 "${f[@]}" || echo 'no CSV yet'
+    sleep 2
+done
+EOF
+chmod +x /tmp/csv_watch.sh
+tmux split-window -v -t "$SESSION":0.1 "bash /tmp/csv_watch.sh"
 
 tmux attach -t "$SESSION"
