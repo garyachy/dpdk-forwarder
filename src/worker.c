@@ -198,6 +198,18 @@ worker_check_perf_log(struct worker_ctx *ctx, uint64_t now_tsc)
     ctx->table_full_warned = false;
 }
 
+/* ── Per-burst scratch buffers ──────────────────────────────────────────── */
+
+struct burst_ctx {
+    struct rte_mbuf   *rx_pkts[FWD_MAX_BURST];
+    struct rte_mbuf   *tx_pkts[FWD_MAX_BURST];
+    struct flow_entry *tx_flows[FWD_MAX_BURST];
+    struct flow_key    keys[FWD_MAX_BURST];
+    const void        *key_ptrs[FWD_MAX_BURST];
+    uint16_t           ip_pkts[FWD_MAX_BURST];
+    int32_t            positions[FWD_MAX_BURST];
+};
+
 /* ── worker_init ────────────────────────────────────────────────────────── */
 
 int worker_init(struct worker_ctx *ctx, unsigned lcore_id,
@@ -265,13 +277,7 @@ int worker_run(void *arg)
     const uint16_t tx_queue = ctx->tx_queue_id;
     const uint32_t burst    = cfg->burst_size;
 
-    struct rte_mbuf    *rx_pkts[FWD_MAX_BURST];
-    struct rte_mbuf    *tx_pkts[FWD_MAX_BURST];
-    struct flow_entry  *tx_flows[FWD_MAX_BURST];
-    struct flow_key     keys[FWD_MAX_BURST];
-    const void         *key_ptrs[FWD_MAX_BURST];
-    uint16_t            ip_pkts[FWD_MAX_BURST];
-    int32_t             positions[FWD_MAX_BURST];
+    struct burst_ctx bc;
 
     LOG_INFO("worker lcore %u started", ctx->lcore_id);
     rte_rcu_qsbr_thread_online(ctx->qsv, ctx->lcore_id);
@@ -279,7 +285,7 @@ int worker_run(void *arg)
     uint64_t idle_count = 0;
 
     while (!force_quit) {
-        uint16_t nb_rx = rte_eth_rx_burst(rx_port, rx_queue, rx_pkts, burst);
+        uint16_t nb_rx = rte_eth_rx_burst(rx_port, rx_queue, bc.rx_pkts, burst);
 
         if (nb_rx == 0) {
             ctx->perf.idle_polls++;
@@ -303,13 +309,13 @@ int worker_run(void *arg)
 
         uint64_t proc_start = now_tsc;
 
-        uint16_t nb_ip = burst_parse(rx_pkts, nb_rx, keys, key_ptrs, ip_pkts);
+        uint16_t nb_ip = burst_parse(bc.rx_pkts, nb_rx, bc.keys, bc.key_ptrs, bc.ip_pkts);
 
         if (nb_ip > 0)
-            rte_hash_lookup_bulk(ctx->ftable.ht, key_ptrs, nb_ip, positions);
+            rte_hash_lookup_bulk(ctx->ftable.ht, bc.key_ptrs, nb_ip, bc.positions);
 
-        uint16_t nb_tx = burst_flow_update(ctx, rx_pkts, tx_pkts, tx_flows,
-                                           keys, key_ptrs, ip_pkts, positions,
+        uint16_t nb_tx = burst_flow_update(ctx, bc.rx_pkts, bc.tx_pkts, bc.tx_flows,
+                                           bc.keys, bc.key_ptrs, bc.ip_pkts, bc.positions,
                                            nb_ip, now_tsc);
 
         ctx->perf.proc_cycles += rte_rdtsc() - proc_start;
@@ -318,8 +324,8 @@ int worker_run(void *arg)
         if (nb_tx == 0)
             continue;
 
-        uint16_t nb_sent = rte_eth_tx_burst(tx_port, tx_queue, tx_pkts, nb_tx);
-        burst_tx_stats(ctx, tx_pkts, tx_flows, nb_sent, nb_tx);
+        uint16_t nb_sent = rte_eth_tx_burst(tx_port, tx_queue, bc.tx_pkts, nb_tx);
+        burst_tx_stats(ctx, bc.tx_pkts, bc.tx_flows, nb_sent, nb_tx);
         ctx->perf.tx_packets += nb_sent;
 
         rte_rcu_qsbr_quiescent(ctx->qsv, ctx->lcore_id);

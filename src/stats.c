@@ -13,23 +13,15 @@ void stats_write_header(FILE *f)
                "proto,rx_bytes,tx_bytes,rx_packets,tx_packets\n");
 }
 
-void stats_write_row(FILE *f, const struct flow_entry *e)
+void stats_write_row(FILE *f, const struct flow_entry *e, const char *ts)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-
-    char tbuf[32];
-    struct tm tm;
-    gmtime_r(&ts.tv_sec, &tm);
-    strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-
     char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &e->key.src_ip, src_ip, sizeof(src_ip));
     inet_ntop(AF_INET, &e->key.dst_ip, dst_ip, sizeof(dst_ip));
 
     fprintf(f, "%s,%s,%s,%u,%u,%u,%" PRIu64 ",%" PRIu64
                ",%" PRIu64 ",%" PRIu64 "\n",
-            tbuf,
+            ts,
             src_ip, dst_ip,
             ntohs(e->key.src_port), ntohs(e->key.dst_port),
             e->key.proto,
@@ -61,6 +53,13 @@ void stats_export_and_expire(struct worker_ctx *ctx, uint64_t now_tsc)
     struct flow_table *ft = &ctx->ftable;
     FILE *f = ctx->csv_file;
 
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    char tbuf[32];
+    struct tm tm;
+    gmtime_r(&ts.tv_sec, &tm);
+    strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+
     uint32_t iter = 0;
     const void *key;
     void *data;
@@ -69,7 +68,7 @@ void stats_export_and_expire(struct worker_ctx *ctx, uint64_t now_tsc)
 
     while ((pos = rte_hash_iterate(ft->ht, &key, &data, &iter)) >= 0) {
         struct flow_entry *e = &ft->entries[pos];
-        stats_write_row(f, e);
+        stats_write_row(f, e, tbuf);
 
         if (now_tsc - e->last_seen_tsc > ctx->timeout_tsc)
             ctx->expired_keys[nb_expired++] = e->key;

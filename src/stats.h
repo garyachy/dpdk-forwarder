@@ -7,6 +7,6 @@ void stats_export_and_expire(struct worker_ctx *ctx, uint64_t now_tsc);
 #include <stdio.h>
 #include "flow.h"
 /* Minimal signature for unit tests */
-void stats_write_row(FILE *f, const struct flow_entry *e);
+void stats_write_row(FILE *f, const struct flow_entry *e, const char *ts);
 void stats_write_header(FILE *f);
 #endif

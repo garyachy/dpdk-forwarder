@@ -63,7 +63,7 @@ static void test_row_format(void)
     char buf[512] = {0};
     FILE *f = fmemopen(buf, sizeof(buf), "w");
     assert(f);
-    stats_write_row(f, &e);
+    stats_write_row(f, &e, "2026-01-01T00:00:00Z");
     fflush(f);
     fclose(f);
 
