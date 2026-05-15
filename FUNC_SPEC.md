@@ -355,12 +355,11 @@ Log format: `[function:line] message\n`
 | Ninja | ≥ 1.10 | Ubuntu 22.04 package |
 | python3-pyelftools | any | Ubuntu 22.04 package |
 | libnuma-dev | any | Ubuntu 22.04 package |
-| libpcap-dev | any | Ubuntu 22.04 package (for pcap PMD) |
 | tmux | any | Runtime image only |
 
 ### 12.2 Virtual PMD Selection
 
-`net_virtio_user` is used for functional testing because it is the only DPDK virtual PMD with genuine RSS support (40-byte configurable Toeplitz key, 128-entry RETA). `net_ring`, `net_null`, and `net_pcap` do not support RSS and must not be used for flow affinity verification.
+`net_virtio_user` is used for functional testing because it is the only DPDK virtual PMD with genuine RSS support (40-byte configurable Toeplitz key, 128-entry RETA). `net_ring` and `net_null` do not support RSS and must not be used for flow affinity verification.
 
 Traffic generation uses `dpdk-testpmd` with `net_vhost` (paired with `net_virtio_user` via Unix domain sockets).
 
@@ -407,7 +406,7 @@ Flow entry pointers are stored in a parallel `tx_flows[]` array during the RX pr
 
 Guarantees that `parse_key` is inlined at its single call site in the hot loop, eliminating function-call setup/teardown and giving the compiler full visibility to schedule the loads and branches optimally.
 
-#### 3. `rte_hash_lookup_bulk` (196 → 121 cycles/pkt — measured on 10k-packet trace)
+#### 3. `rte_hash_lookup_bulk`
 
 The most impactful single change. The hot loop is restructured into three explicit phases per burst:
 
@@ -433,22 +432,11 @@ For each packet `i`, `rte_prefetch0(rte_pktmbuf_mtod(rx_pkts[i+1]))` is issued o
 
 ### 13.3 Measured Cycle Counts
 
-All measurements on `net_pcap` PMD with a 10,000-packet trace (5 flows, hot L1/L2 cache). `proc_cycles` excludes `rte_eth_rx_burst` and `rte_eth_tx_burst` I/O time.
-
-| Optimization state | cycles/pkt |
-|--------------------|-----------|
-| Baseline (double lookup, tx_burst included) | 1130 |
-| No double lookup + exclude I/O from measurement | 332 |
-| + `always_inline` parse_key | 317 |
-| *(stabilised with 10k-packet trace)* | 196 |
-| + `rte_hash_lookup_bulk` + 1 rdtsc/burst + lazy idle | **121** |
-
-Expected ranges by environment:
+`proc_cycles` excludes `rte_eth_rx_burst` and `rte_eth_tx_burst` I/O time. Measurements use `net_virtio_user` (vhost socket).
 
 | Environment | Typical cycles/pkt | Notes |
 |-------------|-------------------|-------|
-| `net_pcap` (regression test, 10k pkts) | ~120–150 | Hot cache, 5 flows |
-| `net_virtio_user` (vhost socket, 100% poll eff.) | ~340–350 | 3 workers, 1 TCP flow; measured live with run_lab.sh |
+| `net_virtio_user` (vhost socket, 100% poll eff.) | ~340–350 | 3 workers, 1 TCP flow; measured live with run_vdev.sh |
 | Physical NIC (10G/25G), warm cache | ~80–150 | Line-rate, small table |
 | Physical NIC, large table (100k+ flows) | ~150–300 | L2/L3 misses on flow entries dominate |
 

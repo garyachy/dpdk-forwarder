@@ -8,7 +8,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     python3-pyelftools \
     libnuma-dev \
-    libpcap-dev \
     pkg-config \
     git \
   && rm -rf /var/lib/apt/lists/*
@@ -18,7 +17,7 @@ RUN cd /build/dpdk && \
     meson setup build \
       --prefix=/usr/local \
       -Dplatform=generic \
-      -Ddisable_drivers="crypto/*,compress/*,regex/*,baseband/*,dma/*,event/*,raw/*" \
+      -Ddisable_drivers="crypto/*,compress/*,regex/*,baseband/*,dma/*,event/*,raw/*,net/pcap" \
       -Ddisable_libs="bbdev,bitratestats,bpf,cfgfile,efd,fib,flow_classify,gpudev,gro,gso,ipsec,jobstats,latencystats,member,metrics,mldev,pdcp,pdump,power,rib,sched,security" \
     && ninja -C build install \
     && ldconfig
@@ -37,7 +36,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libatomic1 \
     libnuma1 \
-    libpcap0.8 \
     tmux \
     python3 \
   && rm -rf /var/lib/apt/lists/*
