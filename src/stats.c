@@ -85,13 +85,8 @@ void stats_export_and_expire(struct worker_ctx *ctx, uint64_t now_tsc)
          */
         rte_rcu_qsbr_synchronize(ctx->qsv, RTE_QSBR_THRID_INVALID);
 
-        for (uint32_t i = 0; i < nb_expired; i++) {
-            int32_t p = rte_hash_del_key(ft->ht, &ctx->expired_keys[i]);
-            if (p >= 0) {
-                memset(&ft->entries[p], 0, sizeof(ft->entries[p]));
-                ft->count--;
-            }
-        }
+        for (uint32_t i = 0; i < nb_expired; i++)
+            flow_delete(ft, &ctx->expired_keys[i]);
     }
 }
 

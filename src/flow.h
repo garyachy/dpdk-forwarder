@@ -53,7 +53,18 @@ struct flow_entry *flow_lookup_or_create(struct flow_table *ft,
                                          const struct flow_key *key,
                                          uint64_t now_tsc);
 
-#ifdef UNIT_TEST
+#ifndef UNIT_TEST
+#include <string.h>
+/* Delete one flow: remove from hash, zero the entry, decrement count. */
+static inline void flow_delete(struct flow_table *ft, const struct flow_key *key)
+{
+    int32_t p = rte_hash_del_key(ft->ht, key);
+    if (p >= 0) {
+        memset(&ft->entries[p], 0, sizeof(ft->entries[p]));
+        ft->count--;
+    }
+}
+#else
 /* Test-only helper: expire flows inline (production expiry is in stats_export_and_expire). */
 void flow_expire(struct flow_table *ft, uint64_t now_tsc, uint64_t timeout_tsc);
 #endif
