@@ -2,10 +2,16 @@
 #include <time.h>
 #include <inttypes.h>
 #include <arpa/inet.h>
+#include <string.h>
+
+#include <rte_hash.h>
+#include <rte_cycles.h>
+#include <rte_rcu_qsbr.h>
 
 #include "stats.h"
 #include "flow.h"
 #include "log.h"
+#include "worker.h"
 
 void stats_write_header(FILE *f)
 {
@@ -28,13 +34,6 @@ void stats_write_row(FILE *f, const struct flow_entry *e, const char *ts)
             e->rx_bytes, e->tx_bytes,
             e->rx_packets, e->tx_packets);
 }
-
-#ifndef UNIT_TEST
-
-#include <rte_hash.h>
-#include <rte_cycles.h>
-#include <rte_rcu_qsbr.h>
-#include "worker.h"
 
 /*
  * Called by the main lcore on each stats interval.
@@ -89,5 +88,3 @@ void stats_export_and_expire(struct worker_ctx *ctx, uint64_t now_tsc)
             flow_delete(ft, &ctx->expired_keys[i]);
     }
 }
-
-#endif /* !UNIT_TEST */

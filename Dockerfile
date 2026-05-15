@@ -28,7 +28,7 @@ FROM dpdk-builder AS app-builder
 
 COPY . /build/app/
 WORKDIR /build/app
-RUN meson setup build && ninja -C build
+RUN meson setup build && ninja -C build && ninja -C build test
 
 # Stage 3: Minimal runtime image (no system DPDK — we copy compiled libs from builder)
 FROM ubuntu:22.04 AS runtime

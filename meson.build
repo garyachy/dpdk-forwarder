@@ -17,19 +17,21 @@ executable('dpdk-forwarder', sources,
   dependencies : dpdk,
   install : true)
 
-# Unit tests — compiled without DPDK runtime via -DUNIT_TEST
-# The test files #include the .c sources directly, so list only the test file here.
+inc = include_directories('src')
+
+# Tests run inside the container with full DPDK (--no-huge --in-memory).
+# No shim, no -DUNIT_TEST: the tests exercise the actual rte_hash code paths.
 test_flow = executable('test_flow',
-  ['tests/test_flow.c'],
-  c_args : ['-DUNIT_TEST'],
-  include_directories : include_directories('src'),
+  files('tests/test_flow.c', 'src/flow.c'),
+  dependencies : dpdk,
+  include_directories : inc,
   install : false)
 
 test_stats = executable('test_stats',
-  ['tests/test_stats.c'],
-  c_args : ['-DUNIT_TEST'],
-  include_directories : include_directories('src'),
+  files('tests/test_stats.c', 'src/stats.c', 'src/flow.c'),
+  dependencies : dpdk,
+  include_directories : inc,
   install : false)
 
-test('flow table',  test_flow)
-test('stats export', test_stats)
+test('flow table',   test_flow,  timeout : 120)
+test('stats export', test_stats, timeout : 30)

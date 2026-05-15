@@ -4,9 +4,26 @@
 #include <assert.h>
 #include <time.h>
 
-#define UNIT_TEST
-#include "../src/flow.h"
-#include "../src/flow.c"   /* include implementation for unit build */
+#include <rte_eal.h>
+#include <rte_hash.h>
+
+#include "flow.h"
+
+static void init_eal(void)
+{
+    char *argv[] = {
+        "test_flow", "-c", "0x1",
+        "--no-huge", "--no-pci",
+        "--file-prefix=test_flow",
+        "--iova-mode=va", "--no-telemetry",
+        "--log-level", "1",
+    };
+    int argc = (int)(sizeof(argv) / sizeof(argv[0]));
+    if (rte_eal_init(argc, argv) < 0) {
+        fprintf(stderr, "rte_eal_init failed\n");
+        exit(1);
+    }
+}
 
 static struct flow_key make_key(uint32_t sip, uint32_t dip,
                                 uint16_t sp,  uint16_t dp, uint8_t proto)
@@ -50,16 +67,16 @@ static void test_insert_lookup(void)
 static void test_table_full(void)
 {
     struct flow_table ft;
-    assert(flow_table_init(&ft, 4, 0, 0) == 0);
+    assert(flow_table_init(&ft, 64, 1, 0) == 0);
 
-    for (uint16_t i = 0; i < 4; i++) {
+    for (uint16_t i = 0; i < 64; i++) {
         struct flow_key k = make_key(i, i, i, i, 6);
         assert(flow_lookup_or_create(&ft, &k, 1) != NULL);
     }
-    assert(ft.count == 4);
+    assert(ft.count == 64);
 
     /* Table full → NULL */
-    struct flow_key k = make_key(99, 99, 99, 99, 6);
+    struct flow_key k = make_key(999, 999, 999, 999, 6);
     assert(flow_lookup_or_create(&ft, &k, 1) == NULL);
 
     flow_table_free(&ft);
@@ -69,7 +86,7 @@ static void test_table_full(void)
 static void test_expire(void)
 {
     struct flow_table ft;
-    assert(flow_table_init(&ft, 16, 0, 0) == 0);
+    assert(flow_table_init(&ft, 16, 2, 0) == 0);
 
     struct flow_key k1 = make_key(1, 1, 1, 1, 6);
     struct flow_key k2 = make_key(2, 2, 2, 2, 6);
@@ -86,8 +103,7 @@ static void test_expire(void)
     struct flow_entry *e = flow_lookup_or_create(&ft, &k2, 1000);
     assert(e != NULL);
 
-    /* k1 gone */
-    /* After expiry the slot is cleared; a fresh insert should succeed */
+    /* k1 gone — fresh insert should succeed */
     struct flow_entry *e1 = flow_lookup_or_create(&ft, &k1, 1000);
     assert(e1 != NULL);
 
@@ -98,7 +114,7 @@ static void test_expire(void)
 static void test_stat_counters(void)
 {
     struct flow_table ft;
-    assert(flow_table_init(&ft, 16, 0, 0) == 0);
+    assert(flow_table_init(&ft, 16, 3, 0) == 0);
 
     struct flow_key k = make_key(1, 2, 10, 20, 17);
     struct flow_entry *e = flow_lookup_or_create(&ft, &k, 1);
@@ -117,11 +133,12 @@ static void test_stat_counters(void)
 
 static void test_scale_export(void)
 {
-    const uint32_t n_flows = 1000000;
-    const uint32_t cap     = 1u << 21;  /* 2 097 152 — ~47% load factor */
+    /* 100k flows at ~38% load — fits in normal memory (no hugepages in CI). */
+    const uint32_t n_flows = 100000;
+    const uint32_t cap     = 1u << 18;  /* 262 144 — ~38% load factor */
 
     struct flow_table ft;
-    assert(flow_table_init(&ft, cap, 0, 0) == 0);
+    assert(flow_table_init(&ft, cap, 4, 0) == 0);
 
     struct timespec t0, t1;
 
@@ -139,26 +156,24 @@ static void test_scale_export(void)
                        (t1.tv_nsec - t0.tv_nsec) * 1e-6;
     assert(ft.count == n_flows);
 
-    /* Time the full linear walk of all entries (simulates export-path iteration).
-     * Each occupied entry is touched to force a cache load — mirrors what
-     * stats_write_row does when reading counters for CSV output. */
+    /* Walk via rte_hash_iterate — mirrors stats_export_and_expire */
     clock_gettime(CLOCK_MONOTONIC, &t0);
     uint32_t walked = 0;
-    ut_ht_t *ht = (ut_ht_t *)ft.ht;
-    for (uint32_t i = 0; i < ht->capacity; i++) {
-        if (ht->occupied[i] == 1) { /* live entries only, skip tombstones */
-            volatile uint64_t x = ht->slots[i].rx_bytes;
-            (void)x;
-            walked++;
-        }
+    uint32_t iter = 0;
+    const void *key;
+    void *data;
+    int32_t pos;
+    while ((pos = rte_hash_iterate(ft.ht, &key, &data, &iter)) >= 0) {
+        volatile uint64_t x = ft.entries[pos].rx_bytes;
+        (void)x;
+        walked++;
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double walk_ms = (t1.tv_sec - t0.tv_sec) * 1e3 +
                      (t1.tv_nsec - t0.tv_nsec) * 1e-6;
     assert(walked == n_flows);
 
-    /* Time expire-all (timeout=0 forces every entry to be deleted).
-     * This is the deletion pass that follows the CSV write in the current design. */
+    /* Expire all (timeout=0 forces every entry out) */
     clock_gettime(CLOCK_MONOTONIC, &t0);
     flow_expire(&ft, (uint64_t)n_flows + 1, 0);
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -177,11 +192,13 @@ static void test_scale_export(void)
 
 int main(void)
 {
+    init_eal();
     test_insert_lookup();
     test_table_full();
     test_expire();
     test_stat_counters();
     test_scale_export();
     printf("All flow table tests passed.\n");
+    rte_eal_cleanup();
     return 0;
 }

@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with DPDK submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build image and run tests
+        # docker build runs: meson build → ninja → ninja test
+        # Tests call rte_eal_init with --no-huge --in-memory so no
+        # hugepages or special privileges are needed on the runner.
+        run: docker build -t dpdk-forwarder .
