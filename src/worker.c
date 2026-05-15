@@ -311,8 +311,15 @@ int worker_run(void *arg)
 
         uint16_t nb_ip = burst_parse(bc.rx_pkts, nb_rx, bc.keys, bc.key_ptrs, bc.ip_pkts);
 
-        if (nb_ip > 0)
+        if (nb_ip > 0) {
             rte_hash_lookup_bulk(ctx->ftable.ht, bc.key_ptrs, nb_ip, bc.positions);
+            /* Prefetch each flow entry's cache line before burst_flow_update
+             * touches it. Hides L2/L3 latency when the table is large and
+             * entries are scattered across memory. */
+            for (uint16_t j = 0; j < nb_ip; j++)
+                if (likely(bc.positions[j] >= 0))
+                    rte_prefetch0(&ctx->ftable.entries[bc.positions[j]]);
+        }
 
         uint16_t nb_tx = burst_flow_update(ctx, bc.rx_pkts, bc.tx_pkts, bc.tx_flows,
                                            bc.keys, bc.key_ptrs, bc.ip_pkts, bc.positions,

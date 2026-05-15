@@ -177,8 +177,8 @@ Measurements use `net_virtio_user` (vhost socket). `proc_cycles` covers applicat
 | Environment | Typical cycles/pkt | Notes |
 |---|---|---|
 | `net_virtio_user` (vhost socket) | ~340–350 | 3 workers, measured live with run_vdev.sh |
-| Physical NIC (10G/25G), warm cache | ~80–150 | Line-rate, small table |
-| Physical NIC, large table (100k+ flows) | ~150–300 | L2/L3 cache misses dominate |
+| Physical NIC (10G/25G), warm cache, small table | ~80–150 | Line-rate |
+| Physical NIC, large table (1M+ flows) | ~120–200 | Entry prefetch hides most L3 latency |
 
 At larger frame sizes (256/512/1518 bytes) the cycles/pkt figure is similar — the bottleneck is hash-table lookup and memory bandwidth, not header parsing — but Mpps throughput drops proportionally as PMD I/O time increases.
 

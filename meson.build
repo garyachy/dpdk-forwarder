@@ -33,5 +33,5 @@ test_stats = executable('test_stats',
   include_directories : inc,
   install : false)
 
-test('flow table',   test_flow,  timeout : 120)
+test('flow table',   test_flow,  timeout : 300)
 test('stats export', test_stats, timeout : 30)

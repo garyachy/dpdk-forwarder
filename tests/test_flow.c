@@ -2,10 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 #include <time.h>
 
 #include <rte_eal.h>
 #include <rte_hash.h>
+#include <rte_cycles.h>
+#include <rte_prefetch.h>
 
 #include "flow.h"
 
@@ -14,6 +17,7 @@ static void init_eal(void)
     char *argv[] = {
         "test_flow", "-c", "0x1",
         "--no-huge", "--no-pci",
+        "-m", "512",
         "--file-prefix=test_flow",
         "--iova-mode=va", "--no-telemetry",
         "--log-level", "1",
@@ -133,9 +137,8 @@ static void test_stat_counters(void)
 
 static void test_scale_export(void)
 {
-    /* 100k flows at ~38% load — fits in normal memory (no hugepages in CI). */
-    const uint32_t n_flows = 100000;
-    const uint32_t cap     = 1u << 18;  /* 262 144 — ~38% load factor */
+    const uint32_t n_flows = 1000000;
+    const uint32_t cap     = 1u << 21;  /* 2 097 152 — ~47% load factor */
 
     struct flow_table ft;
     assert(flow_table_init(&ft, cap, 4, 0) == 0);
@@ -190,6 +193,78 @@ static void test_scale_export(void)
     flow_table_free(&ft);
 }
 
+static void test_entry_prefetch(void)
+{
+    const uint32_t n_flows  = 1000000;
+    const uint32_t cap      = 1u << 21;   /* 2 097 152, ~47% load */
+    const uint16_t burst_sz = 32;
+    const uint32_t n_bursts = n_flows / burst_sz;   /* 31 250 */
+
+    struct flow_table ft;
+    assert(flow_table_init(&ft, cap, 5, 0) == 0);
+
+    int32_t *pos = malloc(n_flows * sizeof *pos);
+    assert(pos);
+
+    for (uint32_t i = 0; i < n_flows; i++) {
+        struct flow_key k = make_key(i, 0x0a000001u, (uint16_t)i, 80, 6);
+        struct flow_entry *e = flow_lookup_or_create(&ft, &k, i);
+        assert(e != NULL);
+        e->rx_bytes = (uint64_t)i * 64;
+        pos[i] = rte_hash_lookup(ft.ht, &k);
+        assert(pos[i] >= 0);
+    }
+    assert(ft.count == n_flows);
+
+    volatile uint64_t sink = 0;
+    uint64_t t0, t1;
+
+    /* Warm-up: one sweep to bring entries into LLC */
+    for (uint32_t b = 0; b < n_bursts; b++) {
+        uint32_t base = b * burst_sz;
+        for (uint16_t j = 0; j < burst_sz; j++)
+            sink ^= ft.entries[pos[base + j]].rx_bytes;
+    }
+
+    /* Pass A — no software prefetch (steady-state, entries in LLC) */
+    t0 = rte_rdtsc();
+    for (uint32_t b = 0; b < n_bursts; b++) {
+        uint32_t base = b * burst_sz;
+        for (uint16_t j = 0; j < burst_sz; j++)
+            sink ^= ft.entries[pos[base + j]].rx_bytes;
+    }
+    t1 = rte_rdtsc();
+    uint64_t no_pf = (t1 - t0) / ((uint64_t)n_bursts * burst_sz);
+
+    /* Pass B — full-burst software prefetch before access */
+    t0 = rte_rdtsc();
+    for (uint32_t b = 0; b < n_bursts; b++) {
+        uint32_t base = b * burst_sz;
+        for (uint16_t j = 0; j < burst_sz; j++)
+            rte_prefetch0(&ft.entries[pos[base + j]]);
+        for (uint16_t j = 0; j < burst_sz; j++)
+            sink ^= ft.entries[pos[base + j]].rx_bytes;
+    }
+    t1 = rte_rdtsc();
+    uint64_t with_pf = (t1 - t0) / ((uint64_t)n_bursts * burst_sz);
+
+    int64_t delta = (int64_t)no_pf - (int64_t)with_pf;
+
+    printf("PASS: test_entry_prefetch — 1M flows, burst=%u, entries=%.0f MB\n",
+           burst_sz, (double)cap * sizeof(struct flow_entry) / (1u << 20));
+    printf("      steady-state (LLC-warm) no prefetch: %" PRIu64 " cycles/access\n", no_pf);
+    printf("      steady-state (LLC-warm) sw prefetch: %" PRIu64 " cycles/access\n", with_pf);
+    if (delta > 0)
+        printf("      improvement: %" PRId64 " cycles/access (sw prefetch hides LLC latency)\n", delta);
+    else
+        printf("      overhead:    %" PRId64 " cycles/access"
+               " (entries fit in host LLC; prefetch loop cost dominates)\n", -delta);
+
+    (void)sink;
+    free(pos);
+    flow_table_free(&ft);
+}
+
 int main(void)
 {
     init_eal();
@@ -198,6 +273,7 @@ int main(void)
     test_expire();
     test_stat_counters();
     test_scale_export();
+    test_entry_prefetch();
     printf("All flow table tests passed.\n");
     rte_eal_cleanup();
     return 0;
