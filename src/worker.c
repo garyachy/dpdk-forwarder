@@ -10,6 +10,7 @@
 #include <rte_prefetch.h>
 #include <rte_hash.h>
 
+#include "config.h"
 #include "worker.h"
 #include "flow.h"
 #include "stats.h"
@@ -86,10 +87,13 @@ int worker_init(struct worker_ctx *ctx, unsigned lcore_id,
         return -1;
     }
 
-    if (ftell(ctx->csv_file) == 0)
+    fseek(ctx->csv_file, 0, SEEK_END);
+    if (ftell(ctx->csv_file) == 0) {
         fprintf(ctx->csv_file,
                 "timestamp,src_ip,dst_ip,src_port,dst_port,"
                 "proto,rx_bytes,tx_bytes,rx_packets,tx_packets\n");
+        fflush(ctx->csv_file);
+    }
 
     LOG_INFO("worker lcore %u: queue %u, csv=%s", lcore_id, queue_idx, ctx->csv_path);
     return 0;
@@ -105,13 +109,13 @@ int worker_run(void *arg)
     const uint16_t tx_queue = ctx->tx_queue_id;
     const uint32_t burst    = cfg->burst_size;
 
-    struct rte_mbuf    *rx_pkts[512];
-    struct rte_mbuf    *tx_pkts[512];
-    struct flow_entry  *tx_flows[512];
-    struct flow_key     keys[512];      /* parsed 5-tuples for bulk lookup */
-    const void         *key_ptrs[512]; /* pointers into keys[] */
-    uint16_t            ip_pkts[512];  /* rx_pkts index for each IP packet */
-    int32_t             positions[512];/* rte_hash_lookup_bulk results */
+    struct rte_mbuf    *rx_pkts[FWD_MAX_BURST];
+    struct rte_mbuf    *tx_pkts[FWD_MAX_BURST];
+    struct flow_entry  *tx_flows[FWD_MAX_BURST];
+    struct flow_key     keys[FWD_MAX_BURST];      /* parsed 5-tuples for bulk lookup */
+    const void         *key_ptrs[FWD_MAX_BURST]; /* pointers into keys[] */
+    uint16_t            ip_pkts[FWD_MAX_BURST];  /* rx_pkts index for each IP packet */
+    int32_t             positions[FWD_MAX_BURST];/* rte_hash_lookup_bulk results */
 
     LOG_INFO("worker lcore %u started", ctx->lcore_id);
 

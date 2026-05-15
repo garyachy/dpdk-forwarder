@@ -21,6 +21,9 @@ OUTPUT_DIR=/output
 SESSION=fwd
 
 rm -f "$SOCK_RX" "$SOCK_TX"
+# Remove stale DPDK single-file-segments hugepage files left by a previous run;
+# if they persist across container restarts, EAL init fails before any CSV is created.
+rm -f /dev/hugepages/fwdmap_* /dev/hugepages/genAmap_* /dev/hugepages/genBmap_*
 mkdir -p "$OUTPUT_DIR"
 
 if ! command -v tmux &>/dev/null; then
@@ -86,7 +89,7 @@ while true; do
     clear
     printf '=== %s ===\n' "$(date -u)"
     f=( /output/flow_stats_core_*.csv )
-    [ -f "${f[0]}" ] && tail -5 "${f[@]}" || echo 'no CSV yet'
+    [ -f "${f[0]}" ] && tail -n 5 "${f[@]}" || echo 'no CSV yet'
     sleep 2
 done
 EOF
