@@ -4,10 +4,13 @@
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_malloc.h>
+#include <rte_rcu_qsbr.h>
 
 #include "config.h"
 #include "log.h"
 #include "port.h"
+#include "stats.h"
 #include "worker.h"
 
 volatile bool force_quit;
@@ -84,6 +87,18 @@ int main(int argc, char **argv)
         cfg.nb_workers = actual_queues;
     }
 
+    /*
+     * Create the shared QSBR variable before launching workers so that
+     * ctx->qsv is valid when worker_run() calls rte_rcu_qsbr_thread_online().
+     * RTE_MAX_LCORE is used as the upper bound on registered thread IDs.
+     */
+    size_t qsz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
+    struct rte_rcu_qsbr *qsv = rte_zmalloc("qsbr", qsz, RTE_CACHE_LINE_SIZE);
+    if (!qsv)
+        rte_exit(EXIT_FAILURE, "rte_zmalloc qsbr failed\n");
+    if (rte_rcu_qsbr_init(qsv, RTE_MAX_LCORE) != 0)
+        rte_exit(EXIT_FAILURE, "rte_rcu_qsbr_init failed\n");
+
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
 
@@ -100,17 +115,40 @@ int main(int argc, char **argv)
         struct worker_ctx *ctx = &worker_ctxs[worker_idx];
         if (worker_init(ctx, lcore_id, worker_idx, &cfg, mbuf_pool) != 0)
             rte_exit(EXIT_FAILURE, "worker_init failed for lcore %u\n", lcore_id);
+        ctx->qsv = qsv;
+        rte_rcu_qsbr_thread_register(qsv, lcore_id);
         rte_eal_remote_launch(worker_run, ctx, lcore_id);
         worker_idx++;
     }
 
-    /* Main lcore: wait for shutdown signal */
-    while (!force_quit)
-        rte_delay_ms(FWD_MAIN_POLL_MS);
+    /*
+     * Main lcore: drive the stats export + flow expiry loop.
+     * Workers keep forwarding throughout — no stop-the-world pause.
+     */
+    uint64_t hz             = rte_get_tsc_hz();
+    uint64_t export_interval = (uint64_t)cfg.stats_interval_s * hz;
+    uint64_t last_export    = rte_rdtsc();
 
-    /* Wait for all workers to finish */
+    while (!force_quit) {
+        rte_delay_ms(FWD_MAIN_POLL_MS);
+        uint64_t now = rte_rdtsc();
+        if (now - last_export >= export_interval) {
+            for (uint16_t i = 0; i < worker_idx; i++)
+                stats_export_and_expire(&worker_ctxs[i], now);
+            last_export = now;
+        }
+    }
+
+    /* Wait for all workers to finish and go offline in QSBR. */
     RTE_LCORE_FOREACH_WORKER(lcore_id)
         rte_eal_wait_lcore(lcore_id);
+
+    /* Final export now that all workers are offline — synchronize() is instant. */
+    uint64_t now = rte_rdtsc();
+    for (uint16_t i = 0; i < worker_idx; i++)
+        stats_export_and_expire(&worker_ctxs[i], now);
+
+    rte_free(qsv);
 
     /* Tear down ports */
     rte_eth_dev_stop(cfg.rx_port);

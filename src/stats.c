@@ -41,51 +41,59 @@ void stats_write_row(FILE *f, const struct flow_entry *e)
 
 #include <rte_hash.h>
 #include <rte_cycles.h>
+#include <rte_rcu_qsbr.h>
 #include "worker.h"
 
+/*
+ * Called by the main lcore on each stats interval.
+ *
+ * Pass 1: iterate the hash table — write a CSV row for every active flow and
+ *         collect the keys of flows that have timed out.
+ * Synchronize: wait for all worker lcores to pass a quiescent point so no
+ *              worker holds a stale hash-table position from a lookup that
+ *              finished before we called synchronize.
+ * Pass 2: delete the collected expired keys.
+ *
+ * This never pauses the worker lcores — they keep forwarding throughout.
+ */
 void stats_export_and_expire(struct worker_ctx *ctx, uint64_t now_tsc)
 {
     struct flow_table *ft = &ctx->ftable;
     FILE *f = ctx->csv_file;
-    uint64_t timeout_tsc = ctx->timeout_tsc;
 
     uint32_t iter = 0;
     const void *key;
     void *data;
     int32_t pos;
+    uint32_t nb_expired = 0;
 
     while ((pos = rte_hash_iterate(ft->ht, &key, &data, &iter)) >= 0) {
         struct flow_entry *e = &ft->entries[pos];
-
         stats_write_row(f, e);
 
-        if (now_tsc - e->last_seen_tsc > timeout_tsc) {
-            rte_hash_del_key(ft->ht, key);
-            memset(e, 0, sizeof(*e));
-            ft->count--;
-        }
+        if (now_tsc - e->last_seen_tsc > ctx->timeout_tsc)
+            ctx->expired_keys[nb_expired++] = e->key;
     }
 
     if (fflush(f) != 0)
         LOG_WARN("fflush failed on %s", ctx->csv_path);
 
-    /* Per-interval performance summary */
-    uint64_t hz = rte_get_tsc_hz();
-    uint64_t elapsed_tsc = now_tsc - ctx->perf.interval_tsc;
-    double elapsed_s = hz ? (double)elapsed_tsc / hz : 1.0;
-    uint64_t cpp = ctx->perf.rx_packets ? ctx->perf.proc_cycles / ctx->perf.rx_packets : 0;
-    double mpps = ctx->perf.rx_packets / elapsed_s / 1e6;
-    uint64_t total_polls = ctx->perf.active_polls + ctx->perf.idle_polls;
-    double poll_eff = total_polls ? 100.0 * ctx->perf.active_polls / total_polls : 0.0;
+    if (nb_expired > 0) {
+        /*
+         * Wait for all worker lcores to complete their current burst before
+         * deleting.  Workers call rte_rcu_qsbr_quiescent() after each burst,
+         * so this returns within one burst latency (~10 µs at 1.8 Mpps).
+         */
+        rte_rcu_qsbr_synchronize(ctx->qsv, RTE_QSBR_THRID_INVALID);
 
-    LOG_INFO("[perf] core %u | %" PRIu64 " cycles/pkt | %.3f Mpps"
-             " | rx=%" PRIu64 " tx=%" PRIu64 " | poll_eff=%.1f%%",
-             ctx->lcore_id, cpp, mpps,
-             ctx->perf.rx_packets, ctx->perf.tx_packets,
-             poll_eff);
-
-    memset(&ctx->perf, 0, sizeof(ctx->perf));
-    ctx->perf.interval_tsc = now_tsc;
+        for (uint32_t i = 0; i < nb_expired; i++) {
+            int32_t p = rte_hash_del_key(ft->ht, &ctx->expired_keys[i]);
+            if (p >= 0) {
+                memset(&ft->entries[p], 0, sizeof(ft->entries[p]));
+                ft->count--;
+            }
+        }
+    }
 }
 
 #endif /* !UNIT_TEST */

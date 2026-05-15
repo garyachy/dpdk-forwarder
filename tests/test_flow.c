@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 
 #define UNIT_TEST
 #include "../src/flow.h"
@@ -114,12 +115,73 @@ static void test_stat_counters(void)
     printf("PASS: test_stat_counters\n");
 }
 
+static void test_scale_export(void)
+{
+    const uint32_t n_flows = 1000000;
+    const uint32_t cap     = 1u << 21;  /* 2 097 152 — ~47% load factor */
+
+    struct flow_table ft;
+    assert(flow_table_init(&ft, cap, 0, 0) == 0);
+
+    struct timespec t0, t1;
+
+    /* Insert n_flows unique flows */
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (uint32_t i = 0; i < n_flows; i++) {
+        struct flow_key k = make_key(i, 0x0a000001u, (uint16_t)i, 80, 6);
+        struct flow_entry *e = flow_lookup_or_create(&ft, &k, (uint64_t)i);
+        assert(e != NULL);
+        e->rx_packets = i;
+        e->rx_bytes   = (uint64_t)i * 64;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double insert_ms = (t1.tv_sec - t0.tv_sec) * 1e3 +
+                       (t1.tv_nsec - t0.tv_nsec) * 1e-6;
+    assert(ft.count == n_flows);
+
+    /* Time the full linear walk of all entries (simulates export-path iteration).
+     * Each occupied entry is touched to force a cache load — mirrors what
+     * stats_write_row does when reading counters for CSV output. */
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    uint32_t walked = 0;
+    ut_ht_t *ht = (ut_ht_t *)ft.ht;
+    for (uint32_t i = 0; i < ht->capacity; i++) {
+        if (ht->occupied[i] == 1) { /* live entries only, skip tombstones */
+            volatile uint64_t x = ht->slots[i].rx_bytes;
+            (void)x;
+            walked++;
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double walk_ms = (t1.tv_sec - t0.tv_sec) * 1e3 +
+                     (t1.tv_nsec - t0.tv_nsec) * 1e-6;
+    assert(walked == n_flows);
+
+    /* Time expire-all (timeout=0 forces every entry to be deleted).
+     * This is the deletion pass that follows the CSV write in the current design. */
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    flow_expire(&ft, (uint64_t)n_flows + 1, 0);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double expire_ms = (t1.tv_sec - t0.tv_sec) * 1e3 +
+                       (t1.tv_nsec - t0.tv_nsec) * 1e-6;
+    assert(ft.count == 0);
+
+    printf("PASS: test_scale_export — %u flows (cap=%u)\n", n_flows, cap);
+    printf("      insert=%.1f ms | walk=%.2f ms | expire=%.2f ms\n",
+           insert_ms, walk_ms, expire_ms);
+    printf("      worker stop-the-world estimate: %.2f ms\n",
+           walk_ms + expire_ms);
+
+    flow_table_free(&ft);
+}
+
 int main(void)
 {
     test_insert_lookup();
     test_table_full();
     test_expire();
     test_stat_counters();
+    test_scale_export();
     printf("All flow table tests passed.\n");
     return 0;
 }

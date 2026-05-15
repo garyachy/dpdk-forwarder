@@ -25,7 +25,8 @@ int flow_table_init(struct flow_table *ft, uint32_t capacity,
         .hash_func          = rte_jhash,
         .hash_func_init_val = 0,
         .socket_id          = socket_id,
-        .extra_flag         = RTE_HASH_EXTRA_FLAGS_NO_FREE_ON_DEL,
+        .extra_flag         = RTE_HASH_EXTRA_FLAGS_NO_FREE_ON_DEL |
+                              RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY,
     };
 
     ft->ht = rte_hash_create(&hp);
@@ -96,8 +97,14 @@ struct flow_entry *flow_lookup_or_create(struct flow_table *ft,
 #include <stdint.h>
 #include <time.h>
 
-/* Minimal open-addressing hash table (linear probing) for unit tests.
- * Not thread-safe; single-threaded test use only. */
+/*
+ * Minimal open-addressing hash table (linear probing + tombstones) for unit tests.
+ * Not thread-safe; single-threaded test use only.
+ *
+ * occupied[] values: 0 = empty, 1 = live, 2 = tombstone (deleted).
+ * Lookup stops at 0 (empty) to stay O(1) amortized.  Tombstones are left in
+ * place so entries inserted past a now-deleted slot remain reachable.
+ */
 
 typedef struct {
     uint32_t           capacity;
@@ -151,45 +158,46 @@ struct flow_entry *flow_lookup_or_create(struct flow_table *ft,
     ut_ht_t *ht = ft->ht;
     uint32_t start = ut_hash(key) % ht->capacity;
     uint32_t i = start;
+    uint32_t first_tombstone = UINT32_MAX;
 
+    /* Probe until empty slot (key absent) or matching live slot (hit).
+     * Pass through tombstones (occupied==2) — remember the first one for reuse. */
     do {
-        if (ht->occupied[i] &&
-            memcmp(&ht->slots[i].key, key, sizeof(*key)) == 0) {
+        uint8_t state = ht->occupied[i];
+        if (state == 0)
+            break; /* empty — key not present */
+        if (state == 2) {
+            if (first_tombstone == UINT32_MAX)
+                first_tombstone = i;
+        } else if (memcmp(&ht->slots[i].key, key, sizeof(*key)) == 0) {
             ht->slots[i].last_seen_tsc = now_tsc;
             return &ht->slots[i];
         }
         i = (i + 1) % ht->capacity;
     } while (i != start);
 
-    /* Miss — find empty slot */
+    /* Miss — insert into first tombstone seen, or the empty slot we stopped at. */
     if (ft->count >= ft->capacity)
         return NULL;
 
-    i = start;
-    do {
-        if (!ht->occupied[i]) {
-            ht->occupied[i] = 1;
-            memset(&ht->slots[i], 0, sizeof(ht->slots[i]));
-            ht->slots[i].key           = *key;
-            ht->slots[i].created_tsc   = now_tsc;
-            ht->slots[i].last_seen_tsc = now_tsc;
-            ft->count++;
-            return &ht->slots[i];
-        }
-        i = (i + 1) % ht->capacity;
-    } while (i != start);
-
-    return NULL;
+    uint32_t slot = (first_tombstone != UINT32_MAX) ? first_tombstone : i;
+    ht->occupied[slot] = 1;
+    memset(&ht->slots[slot], 0, sizeof(ht->slots[slot]));
+    ht->slots[slot].key           = *key;
+    ht->slots[slot].created_tsc   = now_tsc;
+    ht->slots[slot].last_seen_tsc = now_tsc;
+    ft->count++;
+    return &ht->slots[slot];
 }
 
 void flow_expire(struct flow_table *ft, uint64_t now_tsc, uint64_t timeout_tsc)
 {
     ut_ht_t *ht = ft->ht;
     for (uint32_t i = 0; i < ht->capacity; i++) {
-        if (ht->occupied[i]) {
+        if (ht->occupied[i] == 1) { /* skip empty and tombstone slots */
             struct flow_entry *e = &ht->slots[i];
             if (now_tsc - e->last_seen_tsc > timeout_tsc) {
-                ht->occupied[i] = 0;
+                ht->occupied[i] = 2; /* tombstone — keeps probe chains intact */
                 memset(e, 0, sizeof(*e));
                 ft->count--;
             }

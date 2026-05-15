@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <rte_mempool.h>
+#include <rte_rcu_qsbr.h>
 
 #include "config.h"
 #include "flow.h"
@@ -25,6 +26,11 @@ struct worker_ctx {
     char                csv_path[512];
     /* throttle "table full" warning: emit at most once per export interval */
     bool                table_full_warned;
+
+    /* RCU: shared quiescent-state variable (set by main before launch) */
+    struct rte_rcu_qsbr *qsv;
+    /* pre-allocated buffer used by main lcore to collect expired keys */
+    struct flow_key     *expired_keys;
 
     /* per-interval performance counters (reset each export cycle) */
     struct {

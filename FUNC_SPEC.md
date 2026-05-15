@@ -54,10 +54,10 @@ The application runs entirely inside Docker. DPDK is included as a git submodule
 
 | Lcore | Role | Responsibilities |
 |-------|------|-----------------|
-| 0 | Main | EAL init, port init, mbuf pool allocation, worker launch, SIGINT/SIGTERM handler |
-| 1..N | Worker | RX burst, header parse, flow lookup/create, TX burst, inline stats export |
+| 0 | Main | EAL init, port init, mbuf pool allocation, worker launch, RCU QSBR setup, stats export + flow expiry loop, SIGINT/SIGTERM handler, final export on shutdown |
+| 1..N | Worker | RX burst, header parse, flow lookup/create, TX burst, per-interval perf logging, RCU quiescent-state reporting |
 
-No dedicated stats-exporter lcore. Export is triggered inline within each worker loop, gated by a TSC timestamp comparison. This avoids any cross-core synchronization.
+Stats export and flow expiry run on the main lcore, which was previously idle. Workers report quiescent states via `rte_rcu_qsbr_quiescent()` after each burst so the main lcore can safely delete expired entries between bursts. See §15 for details.
 
 ### 2.2 Per-Core Data Ownership
 
@@ -289,12 +289,12 @@ Example row:
 
 ### 8.3 Export Semantics
 
-- Export is triggered when `rte_rdtsc() - last_export_tsc > export_tsc_interval`.
+- Export is driven by the **main lcore** at every `--stats-interval` seconds.
 - `export_tsc_interval` is pre-computed at startup: `stats_interval_s * rte_get_tsc_hz()`.
 - All flows in the table are iterated via `rte_hash_iterate()` and written to CSV.
 - Counters are cumulative — the same flow produces one row per export interval showing running totals.
 - `fflush()` is called after each export pass.
-- Flows inactive for longer than `flow_timeout` are deleted during the same pass (no separate timer).
+- Flows inactive for longer than `flow_timeout` are collected during the CSV pass; after `rte_rcu_qsbr_synchronize()` they are deleted from the hash table (two-pass, no stop-the-world on workers).
 
 ---
 
@@ -334,11 +334,12 @@ Log format: `[function:line] message\n`
 
 1. SIGINT/SIGTERM received by main lcore.
 2. `force_quit = true` written (volatile, visible to all lcores).
-3. Workers observe `force_quit`, perform one final export pass, close CSV files, return from lcore function.
+3. Workers observe `force_quit`, call `rte_rcu_qsbr_thread_offline()`, close CSV files, return from lcore function.
 4. Main calls `rte_eal_wait_lcore()` for each worker.
-5. Main calls `rte_eth_dev_stop()` and `rte_eth_dev_close()` for both ports.
-6. Main prints final port stats via `port_stats_print()`.
-7. `rte_eal_cleanup()` and `exit(0)`.
+5. Main performs one final `stats_export_and_expire()` pass for every worker (all workers are offline so `rte_rcu_qsbr_synchronize()` returns instantly).
+6. Main calls `rte_eth_dev_stop()` and `rte_eth_dev_close()` for both ports.
+7. Main prints final port stats via `port_stats_print()`.
+8. `rte_free(qsv)`, `rte_eal_cleanup()`, and `exit(0)`.
 
 ---
 
@@ -447,7 +448,7 @@ Expected ranges by environment:
 | Environment | Typical cycles/pkt | Notes |
 |-------------|-------------------|-------|
 | `net_pcap` (regression test, 10k pkts) | ~120–150 | Hot cache, 5 flows |
-| `net_virtio_user` (vhost socket) | ~100–180 | Depends on flow table size and burst size |
+| `net_virtio_user` (vhost socket, 100% poll eff.) | ~340–350 | 3 workers, 1 TCP flow; measured live with run_lab.sh |
 | Physical NIC (10G/25G), warm cache | ~80–150 | Line-rate, small table |
 | Physical NIC, large table (100k+ flows) | ~150–300 | L2/L3 misses on flow entries dominate |
 
@@ -500,3 +501,91 @@ RETA[0]=0, RETA[1]=1, RETA[2]=2, RETA[3]=0, ...
 ```
 
 `rte_eth_dev_rss_reta_update` writes this table directly into NIC registers. On virtual PMDs (e.g. `net_virtio_user`) the call may return `-ENOTSUP` and is treated as non-fatal — the PMD handles queue steering internally.
+
+### RCU (Read-Copy-Update)
+
+RCU is a synchronization mechanism built on one insight: **readers never block, writers wait for readers to finish naturally**.
+
+The problem it solves: a dedicated export lcore wants to delete expired flow entries from the hash table while worker lcores are actively doing `rte_hash_lookup_bulk` on the same table. A lock would stall the workers. Atomics on individual counters don't help — a worker could be mid-lookup on an entry the exporter just deleted.
+
+RCU avoids this by defining a **quiescent state** — a point where a thread is guaranteed to hold no references into the shared data structure. In DPDK (`rte_rcu_qsbr`), the natural quiescent state is the end of a packet burst. Workers call `rte_rcu_qsbr_quiescent()` once per burst; the exporter calls `rte_rcu_qsbr_synchronize()` before deleting an entry, which blocks until every worker has passed through at least one quiescent point:
+
+```
+Workers (readers)                    Exporter (writer)
+─────────────────                    ─────────────────
+process burst...                     wants to delete flow entry X
+rte_rcu_qsbr_quiescent()  ──────►
+process burst...                     rte_rcu_qsbr_synchronize()
+rte_rcu_qsbr_quiescent()  ──────►     blocks until ALL workers have
+process burst...                       called quiescent at least once
+rte_rcu_qsbr_quiescent()  ──────►    ◄─ returns: no worker holds a
+                                        reference to X
+                                     rte_hash_del_key(X)  ← safe
+```
+
+Once `synchronize` returns, it is guaranteed no worker is mid-lookup on X, so deletion is safe with no locking on the read path.
+
+**Read-side cost:** `rte_rcu_qsbr_quiescent()` is a single relaxed atomic store — one write per burst. No mutex, no CAS loop, no cache line contention between cores.
+
+**Why "read-copy-update":** the full pattern for *updates* (not just deletions) is: keep the old entry live, make a modified copy, atomically swap the pointer so new readers see the new version, wait for quiescent, then free the old copy. This forwarder only needs the deletion half of that pattern.
+
+**Relevance to this codebase:** the main lcore was previously spinning in `rte_delay_ms(100)` doing nothing. The RCU implementation described in §15 moves export and expiry there, eliminating the worker stop-the-world pause at large flow counts at zero extra CPU cost.
+
+---
+
+## 15. Large Flow Table: Stop-the-World Measurement and RCU Fix
+
+### 15.1 The Problem
+
+When `stats_export_and_expire` ran on the worker lcore (original design), it paused forwarding for the entire duration of the flow table walk + expiry deletion pass. At the default of 65 536 flows this pause is imperceptible. At 1 M flows it becomes a measurable drop window.
+
+### 15.2 Stress Test Results
+
+`test_scale_export` (see `tests/test_flow.c`) inserts 1 000 000 flows into a 2 097 152-slot table (47% load factor), then measures:
+
+| Phase | Time (Docker, stdlib hash) |
+|---|---|
+| Insert 1M flows | 283.9 ms (one-time setup) |
+| Walk — read every live entry | **6.88 ms** |
+| Expire — delete every entry | **8.87 ms** |
+| **Worker pause total** | **15.75 ms** |
+
+At 1.8 Mpps per core, a 15.75 ms pause drops **~28 000 packets** and causes NIC RX descriptor ring overflow (`imissed` counter). The production `rte_hash` (hugepage-backed, NUMA-aware) is faster than the stdlib shim used in the test, but the same O(N) walk applies — measured stop-the-world will be in the same order of magnitude.
+
+### 15.3 RCU Solution
+
+The fix moves `stats_export_and_expire` to the main lcore, which was previously idle. Workers are never paused.
+
+**What changed:**
+
+| Component | Change |
+|---|---|
+| `flow.c` | Added `RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY` so workers and main lcore can access the same hash table concurrently |
+| `worker.c` | Removed export call; added `rte_rcu_qsbr_quiescent()` after each active burst and on idle polls |
+| `stats.c` | Collect expired keys during walk, call `rte_rcu_qsbr_synchronize()` once, then delete — never pausing workers |
+| `main.c` | Create shared `rte_rcu_qsbr` variable; register workers; drive export loop at `--stats-interval` cadence |
+
+**What RCU protects and what it does not:**
+
+| Concurrent operation | Protection |
+|---|---|
+| Worker `lookup_bulk` + main `del_key` | **RCU** — `synchronize()` ensures worker finished lookup before delete proceeds |
+| Worker `add_key` + main `iterate` | **`RW_CONCURRENCY`** flag — internal rwlock in `rte_hash` |
+| Worker counter increment + main counter read | x86 aligned 64-bit stores are atomic; slightly stale CSV rows are acceptable for monitoring |
+
+**Worker hot-path overhead added:** one relaxed atomic store (`rte_rcu_qsbr_quiescent`) per burst. On x86 this is ~1–2 cycles — below measurement noise.
+
+**Main lcore export sequence (per interval):**
+
+```
+main lcore                               worker lcores
+──────────────────────────────           ─────────────────────────
+rte_hash_iterate → write CSV rows        rx_burst → lookup_bulk → tx_burst
+collect expired_keys[]                   rte_rcu_qsbr_quiescent()  ◄──────────┐
+                                         rx_burst → lookup_bulk → tx_burst    │
+rte_rcu_qsbr_synchronize()  ────────────────────────────────────────────────► │
+  (blocks ≤ one burst latency ~10 µs)    rte_rcu_qsbr_quiescent()  ────────► ─┘
+rte_hash_del_key(expired[0..N])          (continues forwarding uninterrupted)
+```
+
+Workers forward continuously throughout. The `synchronize()` call on the main lcore blocks for at most one burst latency (~10 µs at 1.8 Mpps with burst=32) — negligible compared to the 5-second export interval.

@@ -19,7 +19,7 @@ RUN cd /build/dpdk && \
       --prefix=/usr/local \
       -Dplatform=generic \
       -Ddisable_drivers="crypto/*,compress/*,regex/*,baseband/*,dma/*,event/*,raw/*" \
-      -Ddisable_libs="bbdev,bitratestats,bpf,cfgfile,efd,fib,flow_classify,gpudev,gro,gso,ipsec,jobstats,latencystats,member,metrics,mldev,pdcp,pdump,power,rcu,rib,sched,security" \
+      -Ddisable_libs="bbdev,bitratestats,bpf,cfgfile,efd,fib,flow_classify,gpudev,gro,gso,ipsec,jobstats,latencystats,member,metrics,mldev,pdcp,pdump,power,rib,sched,security" \
     && ninja -C build install \
     && ldconfig
 
