@@ -451,4 +451,52 @@ Expected ranges by environment:
 | Physical NIC (10G/25G), warm cache | ~80–150 | Line-rate, small table |
 | Physical NIC, large table (100k+ flows) | ~150–300 | L2/L3 misses on flow entries dominate |
 
+---
+
+## 14. Reference: Key Concepts
+
+### Toeplitz Hash (Symmetric RSS)
+
+Toeplitz is the hash function used by NICs for Receive Side Scaling. It works by sliding a secret key over the input bits and XOR-ing windows into an accumulator:
+
+```
+hash = 0
+for each bit b in input (src_ip, dst_ip, src_port, dst_port):
+    if b == 1:
+        hash ^= (current 32-bit window of the key)
+    shift key window left by 1 bit
+```
+
+The `0x6D5A` repeating key used in `port.c` has the symmetric property: `hash(A→B) == hash(B→A)`. This guarantees that both directions of a TCP flow (SYN and ACK) land on the **same RX queue and therefore the same worker core**. Without symmetry, forward and return packets would split across two cores, causing incomplete per-flow counters without cross-core locking.
+
+### False Sharing
+
+False sharing occurs when two CPU cores write to **different variables that happen to occupy the same 64-byte cache line**:
+
+```
+Core 0 writes flow_entry[0]  ──┐
+                                ├── same cache line → coherency protocol serializes both cores
+Core 1 writes flow_entry[1]  ──┘
+```
+
+Even though the cores access distinct addresses, the MESI cache coherency protocol forces each write to invalidate the other core's copy of the line, stalling both pipelines. The cost is typically 100–200 cycles per false-sharing miss — comparable to the entire per-packet processing budget in this forwarder.
+
+The fix is `__rte_cache_aligned` on `struct flow_entry` (see `flow.h`), which pads each entry to a full cache line. Each worker core then writes exclusively to its own lines with no cross-core interference.
+
 The dominant remaining cost at small flow counts is the jhash computation (~50 cycles) and the hash-table bucket access chain. At large flow counts, cache misses on flow entries become the bottleneck — the prefetch and bulk-lookup pipeline hide most of that latency.
+
+### RETA (RSS Redirection Table)
+
+RETA is a lookup table inside the NIC that maps RSS hash buckets to RX queue numbers. After computing the Toeplitz hash of a packet's 5-tuple, the NIC takes the low N bits of that hash as an index into the RETA and steers the packet to whichever queue is stored there:
+
+```
+packet → Toeplitz hash → low 7 bits → RETA[0..127] → queue index → worker core
+```
+
+Typical size is 128 entries. Without explicitly programming the RETA, the NIC uses its power-on default which may not distribute evenly across the actual queue count. `port.c` fills it round-robin across the configured number of queues:
+
+```
+RETA[0]=0, RETA[1]=1, RETA[2]=2, RETA[3]=0, ...
+```
+
+`rte_eth_dev_rss_reta_update` writes this table directly into NIC registers. On virtual PMDs (e.g. `net_virtio_user`) the call may return `-ENOTSUP` and is treated as non-fatal — the PMD handles queue steering internally.

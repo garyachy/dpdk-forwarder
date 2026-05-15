@@ -51,7 +51,7 @@ int main(int argc, char **argv)
         cfg.nb_workers = nb_workers;
 
     /* Pool-size sanity warning */
-    uint32_t min_pool = cfg.nb_workers * cfg.burst_size * 4;
+    uint32_t min_pool = cfg.nb_workers * cfg.burst_size * FWD_POOL_BURST_MULT;
     if (cfg.mbuf_pool_size < min_pool)
         LOG_WARN("pool-size %u may be too small (recommended >= %u)",
                  cfg.mbuf_pool_size, min_pool);
@@ -61,7 +61,7 @@ int main(int argc, char **argv)
     struct rte_mempool *mbuf_pool =
         rte_pktmbuf_pool_create("mbuf_pool",
                                 cfg.mbuf_pool_size,
-                                256,   /* cache size */
+                                FWD_MBUF_CACHE_SIZE,
                                 0,
                                 RTE_MBUF_DEFAULT_BUF_SIZE,
                                 rx_socket);
@@ -106,7 +106,7 @@ int main(int argc, char **argv)
 
     /* Main lcore: wait for shutdown signal */
     while (!force_quit)
-        rte_delay_ms(100);
+        rte_delay_ms(FWD_MAIN_POLL_MS);
 
     /* Wait for all workers to finish */
     RTE_LCORE_FOREACH_WORKER(lcore_id)

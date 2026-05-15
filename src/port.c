@@ -1,12 +1,13 @@
 #include <rte_ethdev.h>
 #include <string.h>
 
+#include "config.h"
 #include "port.h"
 #include "log.h"
 
-/* Symmetric Toeplitz RSS key (52 bytes).
+/* Symmetric Toeplitz RSS key (FWD_RSS_KEY_LEN bytes).
  * RSS(A→B) == RSS(B→A): forward and return traffic land on the same queue. */
-static const uint8_t rss_key[52] = {
+static const uint8_t rss_key[FWD_RSS_KEY_LEN] = {
     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
@@ -16,8 +17,6 @@ static const uint8_t rss_key[52] = {
     0x6D, 0x5A, 0x6D, 0x5A,
 };
 
-static const uint16_t RX_DESC = 1024;
-static const uint16_t TX_DESC = 1024;
 
 int port_init(uint16_t port_id, uint16_t nb_queues,
               struct rte_mempool *mbuf_pool)
@@ -77,8 +76,8 @@ int port_init(uint16_t port_id, uint16_t nb_queues,
         return ret;
     }
 
-    uint16_t rx_desc = RX_DESC;
-    uint16_t tx_desc = TX_DESC;
+    uint16_t rx_desc = FWD_DEFAULT_RX_DESC;
+    uint16_t tx_desc = FWD_DEFAULT_TX_DESC;
     rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &rx_desc, &tx_desc);
 
     int socket = rte_eth_dev_socket_id(port_id);
@@ -102,10 +101,10 @@ int port_init(uint16_t port_id, uint16_t nb_queues,
         return ret;
     }
 
-    /* Configure RETA: map 128 buckets round-robin across queues */
+    /* Configure RETA: map buckets round-robin across queues */
     uint16_t reta_size = dev_info.reta_size;
     if (reta_size == 0)
-        reta_size = 128;
+        reta_size = FWD_DEFAULT_RETA_SIZE;
 
     uint16_t nb_groups = (reta_size + RTE_ETH_RETA_GROUP_SIZE - 1)
                          / RTE_ETH_RETA_GROUP_SIZE;

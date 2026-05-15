@@ -1,5 +1,6 @@
 build/
 output/
+compile_commands.json
 *.csv
 *.o
 *.a

@@ -91,8 +91,8 @@ int config_parse_args(int argc, char **argv, struct fwd_config *cfg)
         fprintf(stderr, "rx-port and tx-port must differ\n");
         return -1;
     }
-    if (cfg->burst_size == 0 || cfg->burst_size > 512) {
-        fprintf(stderr, "burst must be in [1, 512]\n");
+    if (cfg->burst_size == 0 || cfg->burst_size > FWD_MAX_BURST) {
+        fprintf(stderr, "burst must be in [1, %u]\n", FWD_MAX_BURST);
         return -1;
     }
     if (cfg->stats_interval_s == 0) {
