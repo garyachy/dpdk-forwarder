@@ -180,6 +180,17 @@ Measurements use `net_virtio_user` (vhost socket). `proc_cycles` covers applicat
 | Physical NIC (10G/25G), warm cache, small table | ~80–150 | Line-rate |
 | Physical NIC, large table (1M+ flows) | ~120–200 | Entry prefetch hides most L3 latency |
 
+**Flow entry prefetch** (`test_entry_prefetch`, 1M flows, 128 MB entries, burst=32):
+
+| | cycles/access |
+|---|---|
+| No software prefetch (LLC-warm, Docker/KVM) | ~8 |
+| Software prefetch (LLC-warm, Docker/KVM) | ~13 |
+| No software prefetch (bare metal, L3 cold) | ~40–150 |
+| Software prefetch (bare metal, L3 cold) | ~10–20 |
+
+In Docker/KVM the host LLC is large enough to cache the full 128 MB entries array, so the prefetch loop adds ~5 cycles/access overhead with no benefit. On bare metal where the table exceeds LLC, prefetch hides most of the ~150-cycle L3 miss latency.
+
 At larger frame sizes (256/512/1518 bytes) the cycles/pkt figure is similar — the bottleneck is hash-table lookup and memory bandwidth, not header parsing — but Mpps throughput drops proportionally as PMD I/O time increases.
 
 See [FUNC_SPEC.md §13](FUNC_SPEC.md) for the full methodology and hot-path details.
